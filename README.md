@@ -1,5 +1,4 @@
-[I have shared this code on Codelab, too, with some examples.](https://colab.research.google.
-com/drive/1BvNLVQFrNv9fGJ2lUogtJHji1D1Y2djB?usp=sharing)
+[I have shared this code on Codelab, too, with some examples.](https://colab.research.google.com/drive/1BvNLVQFrNv9fGJ2lUogtJHji1D1Y2djB?usp=sharing)
 
 ### Auxiliary Tensorflow Operations
 
