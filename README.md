@@ -4,7 +4,6 @@
 
 This is a repository with some helpful operations for Tensorflow in Python.
 
-
 ### Code to Perform Matrix Multiplications on (n > 2)-rank SparseTensors in TensorFlow
 
 Tensorflow lacks the support to perform matrix multiplications (1) on two sparse tensors that share one or more dimensions in common and (2) on a sparse tensor and a dense tensor that have compatible inner dimensions.
