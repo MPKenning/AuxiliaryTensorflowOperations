@@ -1,16 +1,20 @@
 from time import time
 
+import keras
 import numpy as np
 import tensorflow as tf
 from unittest import TestCase
 
+from keras.engine.base_layer import Layer
 from numpy import mean, product
 from numpy.testing import assert_allclose, assert_equal
 from tensorflow.python.ops.sparse_ops import from_dense, sparse_tensor_to_dense as to_dense
 
-from sparse_tensor_utils import sparse_batched_matmul, sparse_dense_batched_matmul, sparse_flatten_at_dim, \
-    sparse_square_diag, sparse_tile_on_axis
+from sparse_tensor_utils import sparse_batched_matmul, sparse_square_diag, sparse_tile_on_axis, \
+    sparse_dense_batched_matmul, sparse_flatten_at_dim
 
+
+tolerance = 1e-7
 
 def _make_dense_and_sparse_masked_matrices(shape):
     dense = np.random.rand(*shape)
@@ -32,7 +36,7 @@ class SparseUtilsTest(TestCase):
 
         expected = tf.matmul(a, b)
         expected2 = tf.sparse.sparse_dense_matmul(a_sparse, b)
-        result = to_dense(sparse_batched_matmul(a_sparse, b_sparse)).numpy()
+        result = sparse_batched_matmul(a_sparse, b_sparse).numpy()
 
         assert_allclose(expected, expected2)
         assert_allclose(expected, result)
@@ -45,9 +49,38 @@ class SparseUtilsTest(TestCase):
         b, b_sparse = _make_dense_and_sparse_masked_matrices(shape)
 
         expected = tf.matmul(a, b)
-        result = to_dense(sparse_batched_matmul(a_sparse, b_sparse)).numpy()
+        result = sparse_batched_matmul(a_sparse, b_sparse).numpy()
 
         assert_allclose(expected, result)
+
+    def test_sparse_batched_matmul_with_unknown_batched_args_on_graph_execution_returns_known_shape(self):
+        shape = (2, 4, 10, 20)
+        a, a_sparse = _make_dense_and_sparse_masked_matrices(shape)
+
+        shape = (2, 4, 20, 50)
+        b, b_sparse = _make_dense_and_sparse_masked_matrices(shape)
+
+        output = tf.matmul(a, b)
+
+        dataset = tf.data.Dataset.from_tensor_slices(((a_sparse, b_sparse), output)).batch(1)
+
+        class SparseMatMul(Layer):
+            def __init__(self):
+                super(SparseMatMul, self).__init__()
+
+            def call(self, inputs):
+                a, b = inputs
+                tensor = sparse_batched_matmul(a, b)
+                assert tensor.shape != tf.TensorShape(None), 'Shape unknown.'
+                return tensor
+
+        a_inputs = keras.Input(shape=(4, 10, 20), sparse=True)
+        b_inputs = keras.Input(shape=(4, 20, 50), sparse=True)
+        outputs = SparseMatMul()([a_inputs, b_inputs])
+        model = keras.Model(inputs=[a_inputs, b_inputs], outputs=outputs)
+        model.compile(loss=tf.keras.losses.mean_absolute_error)
+        print(model.summary())
+        model.fit(dataset)
 
     def test_sparse_batched_matmul_batched_identically_sized_inputs_and_transpose_of_first_returns_correct_result(
             self):
@@ -56,7 +89,7 @@ class SparseUtilsTest(TestCase):
         b, b_sparse = _make_dense_and_sparse_masked_matrices(shape)
 
         expected = tf.matmul(a, b, transpose_a=True)
-        result = to_dense(sparse_batched_matmul(a_sparse, b_sparse, transpose_a=True)).numpy()
+        result = sparse_batched_matmul(a_sparse, b_sparse, transpose_a=True).numpy()
 
         assert_allclose(expected, result)
 
@@ -67,63 +100,92 @@ class SparseUtilsTest(TestCase):
         b, b_sparse = _make_dense_and_sparse_masked_matrices(shape)
 
         expected = tf.matmul(a, b, transpose_b=True)
-        result = to_dense(sparse_batched_matmul(a_sparse, b_sparse, transpose_b=True)).numpy()
+        result = sparse_batched_matmul(a_sparse, b_sparse, transpose_b=True).numpy()
 
         assert_allclose(expected, result)
 
-    def test_sparse_batched_matmul_compiles_with_jit_compiler(self):
-        shape = (2, 4, 10, 20)
-        a, a_sparse = _make_dense_and_sparse_masked_matrices(shape)
-        b, b_sparse = _make_dense_and_sparse_masked_matrices(shape)
-
-        @tf.function(jit_compile=True)
-        def dense_matmul():
-            return tf.matmul(a, b, transpose_b=True)
-
-        @tf.function(jit_compile=True)
-        def sparse_matmul():
-            return to_dense(sparse_batched_matmul(a_sparse, b_sparse, transpose_b=True))
-
-        expected = dense_matmul()
-        result = sparse_matmul()
-
-        assert_allclose(expected, result)
-
-    def test_sparse_matmul_of_rank_4_sparse_tensor_and_rank_2_dense_tensor_returns_correct_result(self):
+    def test_sparse_matmul_of_rank_4_sparse_tensor_and_rank_3_dense_tensor_returns_correct_result(self):
         shape = (2, 4, 10, 20)
         _, a_sparse = _make_dense_and_sparse_masked_matrices(shape)
-        shape = (20, 10)
+        shape = (2, 20, 30)
         b, _ = _make_dense_and_sparse_masked_matrices(shape)
 
-        expected = tf.matmul(to_dense(a_sparse), b[None, None])
-        result = sparse_dense_batched_matmul(a_sparse, tf.cast(b, b.dtype))
-        result = to_dense(result)
-
+        expected = tf.matmul(to_dense(a_sparse), b[:, None])
+        result = sparse_dense_batched_matmul(a_sparse, b)
         assert_allclose(expected, result)
 
-    def test_sparse_matmul_of_rank_2_dense_tensor_and_rank_4_sparse_tensor_returns_correct_result(self):
+    def test_sparse_matmul_of_rank_4_sparse_tensor_and_rank_3_dense_tensor_transposed_returns_correct_result(self):
         shape = (2, 4, 10, 20)
         _, a_sparse = _make_dense_and_sparse_masked_matrices(shape)
-        shape = (20, 10)
+        shape = (2, 30, 20)
         b, _ = _make_dense_and_sparse_masked_matrices(shape)
 
-        expected = tf.matmul(b[None, None], to_dense(a_sparse))
-        result = sparse_dense_batched_matmul(tf.cast(b, b.dtype), a_sparse)
-        result = to_dense(result)
+        expected = tf.matmul(to_dense(a_sparse), np.transpose(b, (0, 2, 1))[:, None])
+        result = sparse_dense_batched_matmul(a_sparse, b, transpose_dense=True)
+        assert_allclose(expected, result)
 
+    def test_sparse_matmul_of_rank_4_sparse_tensor_transposed_and_rank_3_dense_tensor_returns_correct_result(self):
+        shape = (2, 4, 20, 10)
+        _, a_sparse = _make_dense_and_sparse_masked_matrices(shape)
+        shape = (2, 20, 30)
+        b, _ = _make_dense_and_sparse_masked_matrices(shape)
+
+        expected = tf.matmul(np.transpose(to_dense(a_sparse), (0, 1, 3, 2)), b[:, None])
+        result = sparse_dense_batched_matmul(a_sparse, b, transpose_sparse=True)
+        assert_allclose(expected, result)
+
+    def test_sparse_matmul_of_rank_4_sparse_tensor_transposed_and_rank_3_dense_tensor_transposed_returns_correct_result(
+            self):
+        shape = (2, 4, 20, 10)
+        _, a_sparse = _make_dense_and_sparse_masked_matrices(shape)
+        shape = (2, 30, 20)
+        b, _ = _make_dense_and_sparse_masked_matrices(shape)
+
+        expected = tf.matmul(np.transpose(to_dense(a_sparse), (0, 1, 3, 2)), np.transpose(b, (0, 2, 1))[:, None])
+        result = sparse_dense_batched_matmul(a_sparse, b, transpose_sparse=True, transpose_dense=True)
         assert_allclose(expected, result)
 
     def test_sparse_matmul_of_rank_3_dense_tensor_and_rank_4_sparse_tensor_returns_correct_result(self):
-        shape = (2, 4, 10, 20)
-        _, a_sparse = _make_dense_and_sparse_masked_matrices(shape)
-        shape = (4, 20, 10)
-        b, _ = _make_dense_and_sparse_masked_matrices(shape)
+        shape = (2, 10, 20)
+        a, _ = _make_dense_and_sparse_masked_matrices(shape)
+        shape = (2, 4, 20, 30)
+        _, b_sparse = _make_dense_and_sparse_masked_matrices(shape)
 
-        expected = tf.matmul(to_dense(a_sparse), b[None])
-        result = sparse_dense_batched_matmul(a_sparse, tf.cast(b, b.dtype))
-        result = to_dense(result)
+        expected = tf.matmul(a[:, None], to_dense(b_sparse))
+        result = sparse_dense_batched_matmul(tf.cast(a, a.dtype), b_sparse)
 
         assert_allclose(expected, result)
+
+    def test_sparse_matmul_of_rank_3_sparse_tensor_and_rank_3_dense_tensor_on_graph_exec_returns_correct_result(self):
+        shape = (2, 10, 20)
+        a, a_sparse = _make_dense_and_sparse_masked_matrices(shape)
+        shape = (2, 20, 30)
+        b, _ = _make_dense_and_sparse_masked_matrices(shape)
+
+        output = tf.matmul(a, b)
+
+        dataset = tf.data.Dataset.from_tensor_slices(((a_sparse, b), output)).batch(1)
+
+        class SparseMatMul(Layer):
+            def __init__(self):
+                super(SparseMatMul, self).__init__()
+
+            def call(self, inputs):
+                a, b = inputs
+                tensor = sparse_dense_batched_matmul(a, b)
+                assert tensor.shape != tf.TensorShape(None), 'Shape unknown.'
+                return tensor
+
+        a_inputs = keras.Input(shape=(10, 20), sparse=True)
+        b_inputs = keras.Input(shape=(20, 30))
+        inputs = [a_inputs, b_inputs]
+        outputs = SparseMatMul()(inputs)
+        model = keras.Model(inputs=inputs, outputs=outputs)
+        model.compile(loss=tf.keras.losses.mean_absolute_error)
+        print(model.summary())
+        loss = model.fit(dataset).history['loss'][0]
+
+        self.assertLess(loss, tolerance)
 
     def test_sparse_flatten_on_first_two_dims_returns_correct_shape(self):
         shape = (2, 4, 10, 20)
@@ -298,7 +360,6 @@ class SparseUtilsTest(TestCase):
             outputs_sparse = sparse_matmul(a_sparse, b_sparse)
             sparse_time += [self._stop_timer_and_record_time('sparse', False)]
         sparse_time = mean(sparse_time)
-        outputs_sparse = to_dense(outputs_sparse)
         print(f'Average sparse time: {sparse_time}')
 
         print(f'Sparse is better on rank {len(shape)}: {loop_sparse_time >= sparse_time}')
@@ -370,7 +431,6 @@ class SparseUtilsTest(TestCase):
             outputs_sparse = sparse_matmul(a_sparse, b_sparse)
             sparse_time += [self._stop_timer_and_record_time('sparse', False)]
         sparse_time = mean(sparse_time)
-        outputs_sparse = to_dense(outputs_sparse)
         print(f'Average sparse time: {sparse_time}')
 
         print(f'Sparse is better on rank {len(shape)}: {loop_sparse_time >= sparse_time}')
