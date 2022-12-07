@@ -90,6 +90,9 @@ def sparse_dense_batched_matmul(tensor_a: Union[ndarray, Tensor, SparseTensor],
 
     The dense tensor will be expanded and tiled to match the sparse tensor's dimensions.
 
+    N.B.: It is *very important* that the tensors' shapes are known before they are passed to this function. If they
+    are not known, the tiling that happens in this function will fail because the shape is not known at runtime.
+
     :param tensor_a: The first tensor, either SparseTensor or Tensor.
     :param tensor_b: The second tensor, either SparseTensor or Tensor.
     :param transpose_sparse: (Default: True) Whether the sparse tensor needs to be transposed first. If both tensors
@@ -112,8 +115,8 @@ def sparse_dense_batched_matmul(tensor_a: Union[ndarray, Tensor, SparseTensor],
 
     # Otherwise find out which one is dense.
     else:
-        sparse_is_on_left = False
         if isinstance(tensor_a, (Tensor, ndarray)) and isinstance(tensor_b, SparseTensor):
+            sparse_is_on_left = False
             dense, sparse = tensor_a, tensor_b
 
         # Right one must be dense, etc.
@@ -123,7 +126,7 @@ def sparse_dense_batched_matmul(tensor_a: Union[ndarray, Tensor, SparseTensor],
 
         with tf.name_scope('sparse_dense_batched_matmul'):
             # Ensure that the dense tensor has at least two dimensions.
-            assert len(dense.shape) >= 2
+            assert len(sparse.shape) > 2 and len(dense.shape) > 2
             # TODO Manage the case where the dense tensor is actually a SparseTensor.
 
             # Create a new variable for the dense tensor.
@@ -144,62 +147,11 @@ def sparse_dense_batched_matmul(tensor_a: Union[ndarray, Tensor, SparseTensor],
             # Tile the dense matrix.
             dense = new_dense * dense
 
-            if transpose_sparse and transpose_dense:
-                assert sparse.shape[-2] == dense.shape[-1]
-            elif transpose_dense:
-                assert sparse.shape[-1] == dense.shape[-1]
-            elif transpose_sparse:
-                assert sparse.shape[-2] == dense.shape[-2]
-            else:
-                assert sparse.shape[-1] == dense.shape[-2]
-
             if sparse_is_on_left:
                 return sparse_batched_matmul(sparse, dense, transpose_a=transpose_sparse, transpose_b=transpose_dense)
             else:
                 return sparse_batched_matmul(dense, sparse, transpose_a=transpose_dense, transpose_b=transpose_sparse)
 
-def _uneven_sparse_batched_matmul(tensor_a: SparseTensor, tensor_b: SparseTensor,
-                                  transpose_a=False, transpose_b=False) -> Union[Tensor, SparseTensor]:
-    '''
-    Expands the rank of one tensor to the other before calling `sparse_batched_matmul`.
-    :param tensor_a:
-    :param tensor_b:
-    :param transpose_a:
-    :param transpose_b:
-    :return:
-    '''
-    # Fix expand the sparse tensor to the size of the other.
-    smaller_on_left = False
-    if len(tensor_a.shape) < len(tensor_b.shape):
-        smaller_on_left = True
-        lower_rank_tensor, higher_rank_tensor = tensor_a, tensor_b
-    else:
-        higher_rank_tensor, lower_rank_tensor = tensor_a, tensor_b
-
-    # Create a new variable for the dense tensor.
-    rank_diff = len(higher_rank_tensor.shape) - len(lower_rank_tensor.shape)
-
-    print('lower rank:', lower_rank_tensor.shape)
-    print('higher rank:', higher_rank_tensor.shape)
-
-    # Determine the new shape of the dense tensor.
-    # TODO Assume that the first dimension is the batch dimension
-    unshared_dimensions = higher_rank_tensor.shape[1:rank_diff]
-    print('unshared_dimensions: ', unshared_dimensions)
-    new_non_batch_shape = unshared_dimensions + lower_rank_tensor.shape
-    print('new shape:', new_non_batch_shape)
-
-    # Create a placeholder for the new values.
-    equal_rank_tensor = tf.ones(new_non_batch_shape, dtype=lower_rank_tensor.dtype)
-    equal_rank_tensor = tf.expand_dims(equal_rank_tensor, axis=0)
-    equal_rank_tensor = from_dense(equal_rank_tensor)
-    print('add', lower_rank_tensor.shape)
-    print(' to', equal_rank_tensor.shape)
-
-    equal_rank_tensor = tf.sparse.add(equal_rank_tensor, lower_rank_tensor)
-    print(equal_rank_tensor)
-
-    raise ValueError('Both tensors are sparse. Cannot handle this situation yet.')
 
 def sparse_batched_matmul(tensor_a: SparseTensor, tensor_b: SparseTensor,
                           transpose_a=False, transpose_b=False,
@@ -209,8 +161,13 @@ def sparse_batched_matmul(tensor_a: SparseTensor, tensor_b: SparseTensor,
     be equal. Their outermost dimensions must be identical. Their innermost two dimensions must also have a compatible
     intermediate dimension. For example,
         compatible shapes: a.shape: [<batch_dims>, d, e] and b.shape: [<batch_dims>, e, f] before b is transposed.
+
     By default, `tensor_b` is assumed not to be transposed; i.e., it will need to be transposed within the function
     before being multiplied with `tensor_a`.
+
+    N.B.: It is *very important* that the tensors' shapes are known before they are passed to this function. If they
+    are not known, the tiling that happens in this function will fail because the shape is not known at runtime.
+
     :param tensor_a: A SparseTensor of rank ≥ 2.
     :param tensor_b: A SparseTensor fo rank ≥ 2.
     :param transpose_a: (Bool, default: True) Whether `tensor_a`'s two outermost dimensions need to be transposed
@@ -240,7 +197,11 @@ def sparse_batched_matmul(tensor_a: SparseTensor, tensor_b: SparseTensor,
             perm = list(range(rank - 2)) + [rank - 1, rank - 2]
 
             # Reshape tensor_b to the new shape.
-            return tf.sparse.transpose(tensor, perm)
+            transposed_shape = tensor.shape[:-2] + tensor.shape[-1:] + tensor.shape[-2:-1]
+            transposed = tf.sparse.transpose(tensor, perm)
+            transposed.set_shape(transposed_shape)
+
+            return transposed
 
         # Trying to mimic matmul here, so the operation makes no sense.
         tensor_a = transpose_outer_dimensions(tensor_a) if transpose_a else tensor_a
@@ -251,22 +212,38 @@ def sparse_batched_matmul(tensor_a: SparseTensor, tensor_b: SparseTensor,
         b_factor = tensor_b.shape[-1]
 
         # Expand the dimensions.
+        a_shape = tensor_a.shape + [1]
+        b_shape = tensor_b.shape[:-2] + [1] + tensor_b.shape[-2:]
         tensor_a = tf.sparse.expand_dims(tensor_a, axis=-1)
         tensor_b = tf.sparse.expand_dims(tensor_b, axis=-3)
+        tensor_a.set_shape(a_shape)
+        tensor_b.set_shape(b_shape)
 
         # Tile the respective dimensions.
+        a_shape = tensor_a.shape[:-1] + [b_factor]
+        b_shape = tensor_b.shape[:-3] + [a_factor] + tensor_b.shape[-2:]
         tensor_a = sparse_tile_on_axis(tensor_a, -1, b_factor)
         tensor_b = sparse_tile_on_axis(tensor_b, -3, a_factor)
+        tensor_a.set_shape(a_shape)
+        tensor_b.set_shape(b_shape)
 
-        # Add the indices of each to the other to allow `map_values` to do its magic.
-        tensor_a = tf.cast(tf.sparse.add(tensor_a, sparse_zeros_like(tensor_b, tensor_a.dtype)), tensor_a.dtype)
-        tensor_b = tf.cast(tf.sparse.add(tensor_b, sparse_zeros_like(tensor_a, tensor_b.dtype)), tensor_b.dtype)
+        # Add the indices of each to the other to add explicit zero entries.
+        zeros_tensor_a = sparse_zeros_like(tensor_a, tensor_a.dtype)
+        zeros_tensor_b = sparse_zeros_like(tensor_b, tensor_b.dtype)
+        tensor_a = tf.sparse.add(tensor_a, zeros_tensor_b)
+        tensor_b = tf.sparse.add(tensor_b, zeros_tensor_a)
+        tensor_a.set_shape(a_shape)
+        tensor_b.set_shape(b_shape)
 
         # Multiply the two tensors.
-        intermediate_result = tf.sparse.map_values(tf.multiply, tensor_a, tensor_b)
+        intermediate_result = tensor_a.values * tensor_b.values
+        intermediate_result = SparseTensor(tensor_a.indices, intermediate_result, tf.shape(tensor_a, tf.int64))
+        intermediate_result.set_shape(a_shape)
 
         # Then reduce the intermediate dimension.
+        result_shape = a_shape[:-2] + a_shape[-1:]
         result = tf.sparse.reduce_sum(intermediate_result, axis=-2, output_is_sparse=return_sparse)
+        result.set_shape(result_shape)
 
         return result
 
@@ -281,8 +258,10 @@ def sparse_zeros_like(sparse_tensor: SparseTensor, dtype=tf.int32) -> SparseTens
     with tf.name_scope('sparse_zeros_like'):
         indices = sparse_tensor.indices
         values = tf.zeros_like(sparse_tensor.values)
-        shape = tf.cast(tf.shape(sparse_tensor), tf.int64)
-        return tf.cast(tf.sparse.SparseTensor(indices, values, shape), dtype)
+        shape = tf.shape(sparse_tensor, tf.int64)
+        zero_tensor = tf.cast(tf.sparse.SparseTensor(indices, values, shape), dtype)
+        zero_tensor.set_shape(sparse_tensor.shape)
+        return zero_tensor
 
 
 def sparse_ones_like(sparse_tensor: SparseTensor, dtype=tf.int32) -> SparseTensor:
@@ -295,8 +274,10 @@ def sparse_ones_like(sparse_tensor: SparseTensor, dtype=tf.int32) -> SparseTenso
     with tf.name_scope('sparse_ones_like'):
         indices = sparse_tensor.indices
         values = tf.ones_like(sparse_tensor.values)
-        shape = tf.cast(tf.shape(sparse_tensor), tf.int64)
-        return tf.cast(tf.sparse.SparseTensor(indices, values, shape), dtype)
+        shape = tf.shape(sparse_tensor, tf.int64)
+        one_tensor = tf.cast(tf.sparse.SparseTensor(indices, values, shape), dtype)
+        one_tensor.set_shape(sparse_tensor.shape)
+        return one_tensor
 
 
 def sparse_tile_on_axis(sparse_tensor: SparseTensor, axis, multiple) -> SparseTensor:
@@ -314,24 +295,33 @@ def sparse_tile_on_axis(sparse_tensor: SparseTensor, axis, multiple) -> SparseTe
     with tf.name_scope('sparse_tile'):
         if axis > 0:
             # Make the first permutation of the data---bring selected axis to outermost dimension.
-            original_perm = tf.range(rank)
-            axis_to_outermost_perm = tf.concat(([axis], original_perm[:axis], original_perm[axis + 1:]), axis=0)
+            original_perm = tuple(range(rank))
+            axis_to_outermost_perm = (axis,) + original_perm[:axis] + original_perm[axis + 1:]
 
             # Make the last permutation of the data---bring selected axis back to its position from outermost dimension.
-            axis_to_original_pos_perm = tf.concat((tf.range(1, axis + 1), [0], tf.range(axis + 1, rank)), 0)
+            axis_to_original_pos_perm = tuple(range(1, axis + 1)) + (0,) + tuple(range(axis + 1, rank))
+            transposed_shape = sparse_tensor.shape[axis] + sparse_tensor.shape[0:axis] + sparse_tensor.shape[axis + 1:]
             transposed_sparse_tensor = tf.sparse.transpose(sparse_tensor, axis_to_outermost_perm)
+            transposed_sparse_tensor.set_shape(transposed_shape)
         else:
-            axis_to_original_pos_perm = tf.range(rank)
+            axis_to_original_pos_perm = range(rank)
             transposed_sparse_tensor = sparse_tensor
 
         # Add a new dimension and tile that.
+        expanded_shape = (1,) + transposed_sparse_tensor.shape
         transposed_sparse_tensor = tf.sparse.expand_dims(transposed_sparse_tensor, axis=0)
+        transposed_sparse_tensor.set_shape(expanded_shape)
+
+        # Reorder the shape to ensure that the coordinates are correct.
+        transposed_sparse_tensor = tf.sparse.reorder(transposed_sparse_tensor)
+        transposed_sparse_tensor.set_shape(expanded_shape)
 
         # The sparse tensor's indices and values.
-        transposed_sparse_tensor = tf.sparse.reorder(transposed_sparse_tensor)
         indices = tf.tile(transposed_sparse_tensor.indices, [multiple, 1])
         values = tf.tile(transposed_sparse_tensor.values, [multiple])
-        shape = tf.cast(tf.concat([[multiple], tf.shape(transposed_sparse_tensor)[1:]], axis=0), tf.int64)
+        shape = (multiple,) + transposed_sparse_tensor.shape[1:]
+        # The following has to take a dynamic shape.
+        dynamic_shape = tf.concat([[multiple], tf.shape(transposed_sparse_tensor, tf.int64)[1:]], axis=0)
 
         # Scale the values of the first column of indices.
         n_entries = tf.shape(sparse_tensor.indices)[0]
@@ -340,10 +330,17 @@ def sparse_tile_on_axis(sparse_tensor: SparseTensor, axis, multiple) -> SparseTe
         indices = tf.transpose(tf.tensor_scatter_nd_add(tf.transpose(indices), [[0]], indices_scale))
 
         # Create the tiled sparse tensor.
-        tiled_sparse_tensor = tf.sparse.SparseTensor(indices, values, shape)
+        tiled_sparse_tensor = tf.sparse.SparseTensor(indices, values, dynamic_shape)
+        tiled_sparse_tensor.set_shape(shape)
 
         # Then flatten.
+        first_dim = tiled_sparse_tensor.shape[1]
+        if first_dim is None:
+            flattened_shape = tiled_sparse_tensor.shape[1:]
+        else:
+            flattened_shape = (multiple * first_dim) + tiled_sparse_tensor.shape[2:]
         tiled_sparse_tensor = sparse_flatten_at_dim(tiled_sparse_tensor, 0)
+        tiled_sparse_tensor.set_shape(flattened_shape)
 
         if axis > 0:
             sparse_tensor_transposed_back = tf.sparse.transpose(tiled_sparse_tensor, axis_to_original_pos_perm)

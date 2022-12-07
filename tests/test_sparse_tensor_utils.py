@@ -71,6 +71,7 @@ class SparseUtilsTest(TestCase):
             def call(self, inputs):
                 a, b = inputs
                 tensor = sparse_batched_matmul(a, b)
+                print('Output shape:', tensor.shape)
                 assert tensor.shape != tf.TensorShape(None), 'Shape unknown.'
                 return tensor
 
@@ -80,7 +81,9 @@ class SparseUtilsTest(TestCase):
         model = keras.Model(inputs=[a_inputs, b_inputs], outputs=outputs)
         model.compile(loss=tf.keras.losses.mean_absolute_error)
         print(model.summary())
-        model.fit(dataset)
+        loss = model.fit(dataset).history['loss'][0]
+
+        self.assertLess(loss, tolerance)
 
     def test_sparse_batched_matmul_batched_identically_sized_inputs_and_transpose_of_first_returns_correct_result(
             self):
@@ -243,7 +246,7 @@ class SparseUtilsTest(TestCase):
         def sparse_matmul(in_a, in_b):
             sparse_batched_matmul(in_a, in_b)
 
-        shapes = [(10, 10), (10, 10, 10), (10, 10, 10, 10)]
+        shapes = [(10, 10, 10), (10, 10, 10, 10)]
         repeat = 10
         result_strings = []
         for shape in shapes:
@@ -273,21 +276,24 @@ class SparseUtilsTest(TestCase):
             print(i)
 
     def test_sparse_scales_better_than_dense_with_graph_execution(self):
-        @tf.function
-        def dense_matmul(in_a, in_b):
-            tf.matmul(in_a, in_b)
 
-        @tf.function
-        def sparse_matmul(in_a, in_b):
-            sparse_batched_matmul(in_a, in_b)
-
-        shapes = [(10, 10), (10, 10, 10), (10, 10, 10, 10)]
-        repeat = 10
+        shapes = [(32, 207, 207), (32, 16, 207, 207)]
+        repeat = 1
         result_strings = []
         for shape in shapes:
             print(f'Testing rank {len(shape)} matrices with {product(shape)} elements')
             a, a_sparse = _make_dense_and_sparse_masked_matrices(shape)
             b, b_sparse = _make_dense_and_sparse_masked_matrices(shape)
+
+            @tf.function
+            def dense_matmul(in_a, in_b):
+                tf.matmul(in_a, in_b)
+
+            @tf.function
+            def sparse_matmul(in_a, in_b):
+                in_a.set_shape(shape)
+                in_b.set_shape(shape)
+                sparse_batched_matmul(in_a, in_b)
 
             dense_time = []
             for i in range(repeat):
@@ -338,9 +344,9 @@ class SparseUtilsTest(TestCase):
         def sparse_matmul(a, b):
             return sparse_batched_matmul(a, b)
 
-        shape = (64, 16, 5, 10)
+        shape = (64, 8, 2, 2)
         a, a_sparse = _make_dense_and_sparse_masked_matrices(shape)
-        shape = (64, 16, 10, 20)
+        shape = (64, 8, 2, 2)
         b, b_sparse = _make_dense_and_sparse_masked_matrices(shape)
 
         repeat = 10
@@ -367,6 +373,10 @@ class SparseUtilsTest(TestCase):
         assert_allclose(outputs_loop_sparse, outputs_sparse)
 
     def test_sparse_matmul_is_better_than_looped_matmul_on_graph_execution(self):
+        shape = (64, 32, 20, 20)
+        a, a_sparse = _make_dense_and_sparse_masked_matrices(shape)
+        b, b_sparse = _make_dense_and_sparse_masked_matrices(shape)
+
         @tf.function
         def dense_matmul(in_a, in_b):
             return tf.matmul(in_a, in_b)
@@ -398,14 +408,11 @@ class SparseUtilsTest(TestCase):
 
         @tf.function
         def sparse_matmul(a, b):
+            a.set_shape(shape)
+            b.set_shape(shape)
             return sparse_batched_matmul(a, b)
 
-        shape = (2, 4, 2, 2)
-        a, a_sparse = _make_dense_and_sparse_masked_matrices(shape)
-        shape = (2, 4, 2, 2)
-        b, b_sparse = _make_dense_and_sparse_masked_matrices(shape)
-
-        repeat = 10
+        repeat = 3
         dense_time = []
         dense_result = None
         for i in range(repeat):
@@ -422,7 +429,7 @@ class SparseUtilsTest(TestCase):
             outputs_loop_sparse = loop_sparse_matmul(a_sparse, b)
             loop_sparse_time += [self._stop_timer_and_record_time('looped_sparse', False)]
         loop_sparse_time = mean(loop_sparse_time)
-        print(f'Average loop sparse time: {loop_sparse_time}')
+        print(f'Average loop sparse time on rank {len(shape)}: {loop_sparse_time}')
 
         sparse_time = []
         outputs_sparse = None
@@ -431,7 +438,7 @@ class SparseUtilsTest(TestCase):
             outputs_sparse = sparse_matmul(a_sparse, b_sparse)
             sparse_time += [self._stop_timer_and_record_time('sparse', False)]
         sparse_time = mean(sparse_time)
-        print(f'Average sparse time: {sparse_time}')
+        print(f'Average sparse time on rank {len(shape)}: {sparse_time}')
 
         print(f'Sparse is better on rank {len(shape)}: {loop_sparse_time >= sparse_time}')
 
