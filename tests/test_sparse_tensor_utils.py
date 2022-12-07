@@ -14,10 +14,10 @@ from sparse_tensor_utils import sparse_batched_matmul, sparse_square_diag, spars
     sparse_dense_batched_matmul, sparse_flatten_at_dim
 
 
-tolerance = 1e-7
+tolerance = 1e-6
 
 def _make_dense_and_sparse_masked_matrices(shape):
-    dense = np.random.rand(*shape)
+    dense = np.random.rand(*shape).astype('float32')
     mask = np.random.randint(2, size=shape)
     dense *= mask
     sparse = from_dense(dense)
@@ -317,6 +317,10 @@ class SparseUtilsTest(TestCase):
             print(i)
 
     def test_sparse_matmul_is_better_than_looped_matmul(self):
+        shape = (32, 8, 30, 30)
+        a, a_sparse = _make_dense_and_sparse_masked_matrices(shape)
+        b, b_sparse = _make_dense_and_sparse_masked_matrices(shape)
+
         def loop_sparse_matmul(a, b):
             first_dim = tf.shape(a)[0]
             second_dim = tf.shape(a)[1]
@@ -342,12 +346,9 @@ class SparseUtilsTest(TestCase):
             return outputs
 
         def sparse_matmul(a, b):
+            a.set_shape(shape)
+            b.set_shape(shape)
             return sparse_batched_matmul(a, b)
-
-        shape = (64, 8, 2, 2)
-        a, a_sparse = _make_dense_and_sparse_masked_matrices(shape)
-        shape = (64, 8, 2, 2)
-        b, b_sparse = _make_dense_and_sparse_masked_matrices(shape)
 
         repeat = 10
         loop_sparse_time = []
@@ -370,10 +371,10 @@ class SparseUtilsTest(TestCase):
 
         print(f'Sparse is better on rank {len(shape)}: {loop_sparse_time >= sparse_time}')
 
-        assert_allclose(outputs_loop_sparse, outputs_sparse)
+        assert_allclose(outputs_loop_sparse, outputs_sparse, atol=tolerance)
 
     def test_sparse_matmul_is_better_than_looped_matmul_on_graph_execution(self):
-        shape = (64, 32, 20, 20)
+        shape = (64, 8, 20, 20)
         a, a_sparse = _make_dense_and_sparse_masked_matrices(shape)
         b, b_sparse = _make_dense_and_sparse_masked_matrices(shape)
 
@@ -389,7 +390,6 @@ class SparseUtilsTest(TestCase):
             fourth_dim_a = tf.shape(a)[3]
             third_dim_b = tf.shape(b)[2]
             fourth_dim_b = tf.shape(b)[3]
-
             outputs = tf.zeros((first_dim, second_dim, third_dim_a, fourth_dim_b), dtype=a.dtype)
             for j in range(first_dim):
                 for i in range(second_dim):
@@ -403,7 +403,6 @@ class SparseUtilsTest(TestCase):
                     partial_outputs = tf.expand_dims(partial_outputs, axis=0)
 
                     outputs = tf.tensor_scatter_nd_add(outputs, [[j, i]], partial_outputs)
-
             return outputs
 
         @tf.function
@@ -412,7 +411,7 @@ class SparseUtilsTest(TestCase):
             b.set_shape(shape)
             return sparse_batched_matmul(a, b)
 
-        repeat = 3
+        repeat = 10
         dense_time = []
         dense_result = None
         for i in range(repeat):
