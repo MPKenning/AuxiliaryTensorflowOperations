@@ -165,6 +165,9 @@ def sparse_batched_matmul(tensor_a: SparseTensor, tensor_b: SparseTensor,
     By default, `tensor_b` is assumed not to be transposed; i.e., it will need to be transposed within the function
     before being multiplied with `tensor_a`.
 
+    This function is much slower than looping through the batch dimension(s) and multiplying each matrix pair
+    individually.
+
     N.B.: It is *very important* that the tensors' shapes are known before they are passed to this function. If they
     are not known, the tiling that happens in this function will fail because the shape is not known at runtime.
 
@@ -236,10 +239,9 @@ def sparse_batched_matmul(tensor_a: SparseTensor, tensor_b: SparseTensor,
         tensor_b.set_shape(b_shape)
 
         # Multiply the two tensors.
-        # TODO This step is very, very time-consuming for some reason. I can't figure out why.
-        intermediate_result = tensor_a.values * tensor_b.values
-        intermediate_result = SparseTensor(tensor_a.indices, intermediate_result, tf.shape(tensor_a, tf.int64))
-        intermediate_result.set_shape(a_shape)
+        # TODO The following operation takes an inordinate amount of time. Fix it or use something else.
+        intermediate_result = tf.multiply(tensor_a.values, tensor_b.values)
+        intermediate_result = tensor_a.with_values(intermediate_result)
 
         # Then reduce the intermediate dimension.
         result_shape = a_shape[:-2] + a_shape[-1:]
@@ -257,15 +259,14 @@ def sparse_zeros_like(sparse_tensor: SparseTensor, dtype=tf.int32) -> SparseTens
     :return:
     '''
     with tf.name_scope('sparse_zeros_like'):
-        indices = sparse_tensor.indices
-        values = tf.zeros_like(sparse_tensor.values)
-        shape = tf.shape(sparse_tensor, tf.int64)
-        zero_tensor = tf.cast(tf.sparse.SparseTensor(indices, values, shape), dtype)
-        zero_tensor.set_shape(sparse_tensor.shape)
-        return zero_tensor
+        zeros_tensor = sparse_tensor.with_values(tf.zeros_like(sparse_tensor.values))
+        if dtype is not None:
+            zeros_tensor = tf.cast(zeros_tensor, dtype)
+        zeros_tensor.set_shape(sparse_tensor.shape)
+        return zeros_tensor
 
 
-def sparse_ones_like(sparse_tensor: SparseTensor, dtype=tf.int32) -> SparseTensor:
+def sparse_ones_like(sparse_tensor: SparseTensor, dtype=None) -> SparseTensor:
     '''
     Returns a SparseTensor shaped like the given SparseTensor but consists of only ones.
     :param sparse_tensor: The SparseTensor whose shape should be copied.
@@ -273,12 +274,11 @@ def sparse_ones_like(sparse_tensor: SparseTensor, dtype=tf.int32) -> SparseTenso
     :return:
     '''
     with tf.name_scope('sparse_ones_like'):
-        indices = sparse_tensor.indices
-        values = tf.ones_like(sparse_tensor.values)
-        shape = tf.shape(sparse_tensor, tf.int64)
-        one_tensor = tf.cast(tf.sparse.SparseTensor(indices, values, shape), dtype)
-        one_tensor.set_shape(sparse_tensor.shape)
-        return one_tensor
+        ones_tensor = sparse_tensor.with_values(tf.ones_like(sparse_tensor.values))
+        if dtype is not None:
+            ones_tensor = tf.cast(ones_tensor, dtype)
+        ones_tensor.set_shape(sparse_tensor.shape)
+        return ones_tensor
 
 
 def sparse_tile_on_axis(sparse_tensor: SparseTensor, axis, multiple) -> SparseTensor:

@@ -275,46 +275,77 @@ class SparseUtilsTest(TestCase):
         for i in result_strings:
             print(i)
 
-    def test_sparse_scales_better_than_dense_with_graph_execution(self):
+    def test_sparse_quicker_than_dense_on_one_batch_dimensions_with_graph_execution(self):
 
-        shapes = [(32, 207, 207), (32, 16, 207, 207)]
-        repeat = 1
-        result_strings = []
-        for shape in shapes:
-            print(f'Testing rank {len(shape)} matrices with {product(shape)} elements')
-            a, a_sparse = _make_dense_and_sparse_masked_matrices(shape)
-            b, b_sparse = _make_dense_and_sparse_masked_matrices(shape)
+        shape = (32, 207, 207)
+        repeat = 10
+        print(f'Testing rank {len(shape)} matrices with {product(shape)} elements')
+        a, a_sparse = _make_dense_and_sparse_masked_matrices(shape)
+        b, b_sparse = _make_dense_and_sparse_masked_matrices(shape)
 
-            @tf.function
-            def dense_matmul(in_a, in_b):
-                tf.matmul(in_a, in_b)
+        @tf.function
+        def dense_matmul(in_a, in_b):
+            tf.matmul(in_a, in_b)
 
-            @tf.function
-            def sparse_matmul(in_a, in_b):
-                in_a.set_shape(shape)
-                in_b.set_shape(shape)
-                sparse_batched_matmul(in_a, in_b)
+        @tf.function
+        def sparse_matmul(in_a, in_b):
+            in_a.set_shape(shape)
+            in_b.set_shape(shape)
+            sparse_batched_matmul(in_a, in_b)
 
-            dense_time = []
-            for i in range(repeat):
-                self._start_timer()
-                dense_matmul(a, b)
-                dense_time += [self._stop_timer_and_record_time('dense', False)]
-            dense_time = mean(dense_time)
-            print(f'Average dense time on rank {len(shape)}: {dense_time}')
+        dense_time = []
+        for i in range(repeat):
+            self._start_timer()
+            dense_matmul(a, b)
+            dense_time += [self._stop_timer_and_record_time('dense', False)]
+        dense_time = mean(dense_time)
+        print(f'Average dense time on rank {len(shape)}: {dense_time}')
 
-            sparse_time = []
-            for i in range(repeat):
-                self._start_timer()
-                sparse_matmul(a_sparse, b_sparse)
-                sparse_time += [self._stop_timer_and_record_time('sparse', False)]
-            sparse_time = mean(sparse_time)
-            print(f'Average sparse time on rank {len(shape)}: {sparse_time}')
+        sparse_time = []
+        for i in range(repeat):
+            self._start_timer()
+            sparse_matmul(a_sparse, b_sparse)
+            sparse_time += [self._stop_timer_and_record_time('sparse', False)]
+        sparse_time = mean(sparse_time)
+        print(f'Average sparse time on rank {len(shape)}: {sparse_time}')
 
-            result_strings += [f'Sparse is better on rank {len(shape)}: {dense_time >= sparse_time}']
+        print(f'Sparse is better on rank {len(shape)}: {dense_time >= sparse_time}')
 
-        for i in result_strings:
-            print(i)
+    def test_sparse_quicker_than_dense_on_two_batch_dimensions_with_graph_execution(self):
+
+        shape = (32, 16, 207, 207)
+        repeat = 10
+        print(f'Testing rank {len(shape)} matrices with {product(shape)} elements')
+        a, a_sparse = _make_dense_and_sparse_masked_matrices(shape)
+        b, b_sparse = _make_dense_and_sparse_masked_matrices(shape)
+
+        @tf.function
+        def dense_matmul(in_a, in_b):
+            tf.matmul(in_a, in_b)
+
+        @tf.function
+        def sparse_matmul(in_a, in_b):
+            in_a.set_shape(shape)
+            in_b.set_shape(shape)
+            sparse_batched_matmul(in_a, in_b)
+
+        dense_time = []
+        for i in range(repeat):
+            self._start_timer()
+            dense_matmul(a, b)
+            dense_time += [self._stop_timer_and_record_time('dense', False)]
+        dense_time = mean(dense_time)
+        print(f'Average dense time on rank {len(shape)}: {dense_time}')
+
+        sparse_time = []
+        for i in range(repeat):
+            self._start_timer()
+            sparse_matmul(a_sparse, b_sparse)
+            sparse_time += [self._stop_timer_and_record_time('sparse', False)]
+        sparse_time = mean(sparse_time)
+        print(f'Average sparse time on rank {len(shape)}: {sparse_time}')
+
+        print(f'Sparse is better on rank {len(shape)}: {dense_time >= sparse_time}')
 
     def test_sparse_matmul_is_better_than_looped_matmul(self):
         shape = (32, 8, 30, 30)
@@ -373,8 +404,8 @@ class SparseUtilsTest(TestCase):
 
         assert_allclose(outputs_loop_sparse, outputs_sparse, atol=tolerance)
 
-    def test_sparse_matmul_is_better_than_looped_matmul_on_graph_execution(self):
-        shape = (64, 8, 20, 20)
+    def test_sparse_matmul_is_better_than_looped_matmul_with_one_batch_dimension_on_graph_execution(self):
+        shape = (32, 20, 20)
         a, a_sparse = _make_dense_and_sparse_masked_matrices(shape)
         b, b_sparse = _make_dense_and_sparse_masked_matrices(shape)
 
@@ -385,25 +416,21 @@ class SparseUtilsTest(TestCase):
         @tf.function
         def loop_sparse_matmul(a, b):
             first_dim = tf.shape(a)[0]
-            second_dim = tf.shape(a)[1]
+            second_dim_a = tf.shape(a)[1]
             third_dim_a = tf.shape(a)[2]
-            fourth_dim_a = tf.shape(a)[3]
+            second_dim_b = tf.shape(b)[1]
             third_dim_b = tf.shape(b)[2]
-            fourth_dim_b = tf.shape(b)[3]
-            outputs = tf.zeros((first_dim, second_dim, third_dim_a, fourth_dim_b), dtype=a.dtype)
-            for j in range(first_dim):
-                for i in range(second_dim):
-                    a_slice = tf.sparse.slice(a, [j, i, 0, 0], [1, 1, third_dim_a, fourth_dim_a])
-                    a_slice = tf.sparse.reshape(a_slice, (third_dim_a, fourth_dim_a))
+            outputs = tf.TensorArray(a.dtype, size=first_dim)
+            for idx in range(first_dim):
+                a_slice = tf.sparse.slice(a, [idx, 0, 0], [1, second_dim_a, third_dim_a])
+                a_slice = tf.sparse.reshape(a_slice, (second_dim_a, third_dim_a))
 
-                    b_slice = tf.slice(b, [j, i, 0, 0], [1, 1, third_dim_b, fourth_dim_b])
-                    b_slice = tf.reshape(b_slice, (third_dim_b, fourth_dim_b))
+                b_slice = tf.slice(b, [idx, 0, 0], [1, second_dim_b, third_dim_b])
+                b_slice = tf.reshape(b_slice, (second_dim_b, third_dim_b))
 
-                    partial_outputs = tf.sparse.sparse_dense_matmul(a_slice, b_slice)
-                    partial_outputs = tf.expand_dims(partial_outputs, axis=0)
-
-                    outputs = tf.tensor_scatter_nd_add(outputs, [[j, i]], partial_outputs)
-            return outputs
+                result = tf.sparse.sparse_dense_matmul(a_slice, b_slice)
+                outputs = outputs.write(idx, result)
+            return tf.reshape(outputs.stack(), (first_dim, second_dim_a, third_dim_b))
 
         @tf.function
         def sparse_matmul(a, b):
@@ -444,6 +471,76 @@ class SparseUtilsTest(TestCase):
         assert_allclose(dense_result, outputs_loop_sparse)
         assert_allclose(dense_result, outputs_sparse)
         assert_allclose(outputs_loop_sparse, outputs_sparse)
+
+    def test_sparse_matmul_is_better_than_looped_matmul_with_two_batch_dimensions_but_one_loop_on_graph_execution(self):
+        shape = (64, 32, 20, 20)
+        a, a_sparse = _make_dense_and_sparse_masked_matrices(shape)
+        b, b_sparse = _make_dense_and_sparse_masked_matrices(shape)
+
+        @tf.function
+        def dense_matmul(in_a, in_b):
+            return tf.matmul(in_a, in_b)
+
+        @tf.function
+        def loop_sparse_matmul(a, b):
+            first_dim = tf.shape(a)[0]
+            second_dim = tf.shape(a)[1]
+            third_dim_a = tf.shape(a)[2]
+            fourth_dim_a = tf.shape(a)[3]
+            third_dim_b = tf.shape(b)[2]
+            fourth_dim_b = tf.shape(b)[3]
+            outputs = tf.TensorArray(a.dtype, size=(first_dim * second_dim))
+            for j in range(first_dim):
+                for i in range(second_dim):
+                    a_slice = tf.sparse.slice(a, [j, i, 0, 0], [1, 1, third_dim_a, fourth_dim_a])
+                    a_slice = tf.sparse.reshape(a_slice, (third_dim_a, fourth_dim_a))
+
+                    b_slice = tf.slice(b, [j, i, 0, 0], [1, 1, third_dim_b, fourth_dim_b])
+                    b_slice = tf.reshape(b_slice, (third_dim_b, fourth_dim_b))
+
+                    result = tf.sparse.sparse_dense_matmul(a_slice, b_slice)
+                    outputs = outputs.write(j * second_dim + i, result)
+            return tf.reshape(outputs.stack(), (first_dim, second_dim, third_dim_a, fourth_dim_b))
+
+        @tf.function
+        def sparse_matmul(a, b):
+            a.set_shape(shape)
+            b.set_shape(shape)
+            return sparse_batched_matmul(a, b)
+
+        repeat = 10
+        dense_time = []
+        dense_result = None
+        for i in range(repeat):
+            self._start_timer()
+            dense_result = dense_matmul(a, b)
+            dense_time += [self._stop_timer_and_record_time('dense', False)]
+        dense_time = mean(dense_time)
+        print(f'Average dense time on rank {len(shape)}: {dense_time}')
+
+        loop_sparse_time = []
+        outputs_loop_sparse = None
+        for i in range(repeat):
+            self._start_timer()
+            outputs_loop_sparse = loop_sparse_matmul(a_sparse, b)
+            loop_sparse_time += [self._stop_timer_and_record_time('looped_sparse', False)]
+        loop_sparse_time = mean(loop_sparse_time)
+        print(f'Average loop sparse time on rank {len(shape)}: {loop_sparse_time}')
+
+        sparse_time = []
+        outputs_sparse = None
+        for i in range(repeat):
+            self._start_timer()
+            outputs_sparse = sparse_matmul(a_sparse, b_sparse)
+            sparse_time += [self._stop_timer_and_record_time('sparse', False)]
+        sparse_time = mean(sparse_time)
+        print(f'Average sparse time on rank {len(shape)}: {sparse_time}')
+
+        print(f'Sparse is better on rank {len(shape)}: {loop_sparse_time >= sparse_time}')
+
+        assert_allclose(dense_result, outputs_loop_sparse, atol=tolerance)
+        assert_allclose(dense_result, outputs_sparse, atol=tolerance)
+        assert_allclose(outputs_loop_sparse, outputs_sparse, atol=tolerance)
 
     def test_sparse_concat_vs_dense_tile(self):
         shape = (2, 2)
