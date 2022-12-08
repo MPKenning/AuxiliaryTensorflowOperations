@@ -236,6 +236,7 @@ def sparse_batched_matmul(tensor_a: SparseTensor, tensor_b: SparseTensor,
         tensor_b.set_shape(b_shape)
 
         # Multiply the two tensors.
+        # TODO This step is very, very time-consuming for some reason. I can't figure out why.
         intermediate_result = tensor_a.values * tensor_b.values
         intermediate_result = SparseTensor(tensor_a.indices, intermediate_result, tf.shape(tensor_a, tf.int64))
         intermediate_result.set_shape(a_shape)
